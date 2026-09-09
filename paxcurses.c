@@ -37,9 +37,6 @@ static struct {
     uint8_t bg;
 } color_pairs[16];
 
-/* Private active styling state tracker for text injection routines */
-static uint8_t active_window_attr = A_NORMAL;
-
 /* ==========================================================================
  * PLATFORM DETECTOR & RAW SYSTEM REGISTER WRAPPERS
  * ========================================================================== */
@@ -208,6 +205,7 @@ WINDOW *newwin(int nlines, int ncols, int begin_y, int begin_x) {
     win->virtual_height = nlines;
     win->is_pad = false;
     win->nodelay = false;
+    win->active_attr = A_NORMAL;
 
     size_t cell_count = (size_t)ncols * nlines;
     win->buffer = (PaxCell *)malloc(cell_count * sizeof(PaxCell));
@@ -259,6 +257,7 @@ WINDOW *newpad(int nlines, int ncols) {
     pad->virtual_height = nlines;
     pad->is_pad = true;
     pad->nodelay = false;
+    pad->active_attr = A_NORMAL;
 
     size_t cell_count = (size_t)ncols * nlines;
     pad->buffer = (PaxCell *)malloc(cell_count * sizeof(PaxCell));
@@ -443,32 +442,38 @@ int wmove(WINDOW *win, int y, int x) {
 int move(int y, int x) { return wmove(stdscr, y, x); }
 
 int wattron(WINDOW *win, int attrs) {
-    (void)win;
+    WINDOW *target = win ? win : stdscr;
+    if (!target) return ERR;
+
     if ((attrs & 0x0F) != 0) {
-        active_window_attr = (active_window_attr & 0xF0) | (attrs & 0x0F);
+        target->active_attr = (target->active_attr & 0xF0) | (attrs & 0x0F);
     }
-    active_window_attr |= (attrs & 0xF0);
+    target->active_attr |= (attrs & 0xF0);
+    return OK;
+}
+
+int wattroff(WINDOW *win, int attrs) {
+    WINDOW *target = win ? win : stdscr;
+    if (!target) return ERR;
+
+    if ((attrs & 0x0F) != 0) {
+        target->active_attr &= 0xF0;
+    }
+    target->active_attr &= ~(attrs & 0xF0);
+    return OK;
+}
+
+int wattrset(WINDOW *win, int attrs) {
+    WINDOW *target = win ? win : stdscr;
+    if (!target) return ERR;
+
+    target->active_attr = (uint8_t)attrs;
     return OK;
 }
 
 int attron(int attrs) { return wattron(stdscr, attrs); }
 
-int wattroff(WINDOW *win, int attrs) {
-    (void)win;
-    if ((attrs & 0x0F) != 0) {
-        active_window_attr &= 0xF0;
-    }
-    active_window_attr &= ~(attrs & 0xF0);
-    return OK;
-}
-
 int attroff(int attrs) { return wattroff(stdscr, attrs); }
-
-int wattrset(WINDOW *win, int attrs) {
-    (void)win;
-    active_window_attr = (uint8_t)attrs;
-    return OK;
-}
 
 int attrset(int attrs) { return wattrset(stdscr, attrs); }
 
@@ -498,7 +503,7 @@ int waddch(WINDOW *win, const chtype ch) {
 
     size_t idx = (size_t)win->cur_y * win->width + win->cur_x;
     win->buffer[idx].ch = ch;
-    win->buffer[idx].attr = active_window_attr;
+    win->buffer[idx].attr = win->active_attr;
 
     win->cur_x++;
     if (win->cur_x >= win->width) {

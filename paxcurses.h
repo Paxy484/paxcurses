@@ -90,6 +90,8 @@ typedef struct _pax_win {
     int x, y;            /* Window physical screen offset */
     int width, height;   /* Window physical viewport bounds */
     int cur_x, cur_y;    /* Virtual cursor position tracking */
+
+    uint8_t active_attr;
     
     /* Native Pax Viewport Engine (Used when is_pad == false) */
     int scroll_y;        /* Vertical scroll offset into virtual buffer */
