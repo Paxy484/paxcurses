@@ -1,0 +1,26 @@
+CC     = wcl386
+AR     = wlib
+CFLAGS = -od -zq -bt=dos -l=dos4g -std=c99
+
+# -od:     Force DISABLING of all automatic optimization logic
+# -zq:     Execute silently
+# -bt=dos: Target standard DOS environments natively
+# -l=dos4g: Bind to the DOS/4GW 32-Bit Linear Address Extender
+
+TARGET = paxcurses.lib
+SRC    = paxcurses.c
+OBJ    = paxcurses.obj
+
+# 2. Primary Execution Rule Blocks
+all : $(TARGET)
+
+$(TARGET) : $(OBJ)
+	$(AR) -q -n $(TARGET) +$(OBJ)
+
+$(OBJ) : $(SRC)
+	$(CC) $(CFLAGS) -c $(SRC)
+
+# 3. Pristine State Restoration File Eraser
+clean : .SYMBOLIC
+	del *.obj
+	del *.lib

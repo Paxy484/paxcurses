@@ -1,0 +1,72 @@
+#!/bin/sh
+set -eu
+
+# 1. Verify existence of the core C system compiler
+CC="cc"
+printf "checking for cc... "
+if command -v cc >/dev/null 2>&1; then
+    echo "yes"
+else
+    echo "no"
+    echo "[ERROR] 'cc' not found. Stop." >&2
+    exit 1
+fi
+
+# 2. Establish required layout header files based on active platform environment
+HEADERS="stdio.h stdlib.h stdint.h stdbool.h stddef.h stdarg.h string.h"
+
+OS_TYPE=$(uname -s 2>/dev/null || echo "Unknown")
+case "$OS_TYPE" in
+    *MINGW*|*MSYS*|*CYGWIN*)
+        HEADERS="$HEADERS windows.h conio.h"
+        ;;
+    *)
+        HEADERS="$HEADERS termios.h unistd.h sys/ioctl.h sys/select.h"
+        ;;
+esac
+
+# 3. Comprehensive validation loop over every single required system layout header
+for header in $HEADERS; do
+    printf "checking for <%s>... " "$header"
+    
+    # Strictly portable POSIX check without assuming 'cc -E -' pipeline support
+    echo "#include <$header>" > .tmp_check.c
+    if cc -E .tmp_check.c >/dev/null 2>&1; then
+        echo "yes"
+    else
+        echo "no"
+        echo "[ERROR] critical dependency <$header> is missing from the host environment, Stop." >&2
+        rm -f .tmp_check.c
+        exit 1
+    fi
+done
+rm -f .tmp_check.c
+
+# 4. Set final execution parameters and optimization flags
+CFLAGS="-Wall -Wextra -std=c99"
+TARGET="paxcurses.a"
+
+# 5. Output the completed local build rules Makefile close to the silicon
+printf "configure: creating Makefile... "
+cat << EOF > Makefile
+.POSIX:
+
+CC = $CC
+CFLAGS = $CFLAGS
+TARGET = $TARGET
+
+SRC = paxcurses.c
+OBJ = paxcurses.o
+
+all: \$(TARGET)
+
+\$(TARGET): \$(OBJ)
+	ar -r \$(TARGET) \$(OBJ)
+
+\$(OBJ): \$(SRC)
+	\$(CC) \$(CFLAGS) -c \$(SRC) -o \$(OBJ)
+
+clean:
+	rm -f \$(OBJ) \$(TARGET) Makefile
+EOF
+echo "done"
