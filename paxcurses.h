@@ -68,10 +68,24 @@ typedef uint8_t  attr_t;
 #define KEY_DOWN      0x102
 #define KEY_RIGHT     0x103
 #define KEY_LEFT      0x104
+#define KEY_TAB       0x105  /* Crucial link jumping macro */
+#define KEY_BACKSPACE 0x106  /* Safe deletion tracker */
+#define KEY_ENTER     0x107  /* Multi-platform enter fallback */
+#define KEY_PPAGE     0x108  /* Page Up tracking buffer */
+#define KEY_NPAGE     0x109  /* Page Down tracking buffer */
+#define KEY_HOME      0x10A  /* Return to coordinates [0,0] */
+#define KEY_END       0x10B  /* Jump to end of string matrix */
+#define KEY_RESIZE    0x10C  /* Native viewport adjustment hook */
 #define KEY_MAX       0x1FF
 
 /* Macro Helpers */
 #define getmaxyx(win, y, x) do { (y) = (win) ? (win)->height : 0; (x) = (win) ? (win)->width : 0; } while(0)
+
+/* Dynamic Scrollback Control Macros */
+#define wset_virtual_height(win, vh)   pax_set_virtual_height((win), (vh))
+#define wget_virtual_height(win)       ((win) ? (win)->virtual_height : 0)
+#define wreserve_scrollback(win, lines) pax_reserve_scrollback((win), (lines))
+#define resize(l, c) resizeterm((l), (c))
 
 /* Global window pointers and screen metrics */
 extern struct _pax_win *stdscr;
@@ -128,6 +142,8 @@ int      clear(void);
 int      wclear(WINDOW *win);
 int      erase(void);
 int      werase(WINDOW *win);
+int      wresize(WINDOW *win, int lines, int columns);
+int      resizeterm(int lines, int columns);
 
 /* Coordinate and State Manipulation */
 int      move(int y, int x);
@@ -158,6 +174,10 @@ int      mvwprintw(WINDOW *win, int y, int x, const char *fmt, ...);
 
 /* Wide Character Utilities */
 int      box(WINDOW *win, uint32_t verch, uint32_t horch);
+
+/* Dynamic Canvas & Scrollback Management */
+int      pax_set_virtual_height(WINDOW *win, int new_vh);
+int      pax_reserve_scrollback(WINDOW *win, int additional_lines);
 
 /* Native Pax Viewport Navigation Helpers (Ignored on Pads) */
 int      wscroll_up(WINDOW *win, int n);

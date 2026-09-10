@@ -119,6 +119,32 @@ static void apply_pax_attributes(uint8_t attr) {
 #endif
 }
 
+/* Dynamic internal memory expansion engine helper */
+static int p_ensure_capacity(WINDOW *win, int required_height) {
+    if (!win || win->is_pad) return OK;
+    if (required_height <= win->virtual_height) return OK;
+
+    int new_vh = win->virtual_height;
+    if (new_vh <= 0) new_vh = win->height;
+    while (new_vh < required_height) {
+        new_vh *= 2;
+    }
+
+    size_t new_cell_count = (size_t)win->width * new_vh;
+    PaxCell *new_buffer = (PaxCell *)realloc(win->buffer, new_cell_count * sizeof(PaxCell));
+    if (!new_buffer) return ERR;
+
+    size_t old_cell_count = (size_t)win->width * win->virtual_height;
+    for (size_t i = old_cell_count; i < new_cell_count; i++) {
+        new_buffer[i].ch = ' ';
+        new_buffer[i].attr = A_NORMAL;
+    }
+
+    win->buffer = new_buffer;
+    win->virtual_height = new_vh;
+    return OK;
+}
+
 /* ==========================================================================
  * CORE ENGINE API IMPLEMENTATION
  * ========================================================================== */
@@ -425,6 +451,91 @@ int wclear(WINDOW *win) {
     return OK;
 }
 
+int wresize(WINDOW *win, int lines, int columns) {
+    if (!win || lines <= 0 || columns <= 0) return ERR;
+
+    /* If dimensions are unchanged, return early */
+    if (win->height == lines && win->width == columns) return OK;
+
+    int old_width = win->width;
+    int old_virtual_height = win->virtual_height;
+
+    /* Maintain virtual height to at least match the new physical height */
+    int new_virtual_height = win->virtual_height;
+    if (new_virtual_height < lines) {
+        new_virtual_height = lines;
+    }
+
+    size_t new_virt_cell_count = (size_t)columns * new_virtual_height;
+    size_t new_view_cell_count = (size_t)columns * lines;
+
+    PaxCell *new_buffer = (PaxCell *)malloc(new_virt_cell_count * sizeof(PaxCell));
+    PaxCell *new_old_buffer = (PaxCell *)malloc(new_view_cell_count * sizeof(PaxCell));
+
+    if (!new_buffer || !new_old_buffer) {
+        free(new_buffer);
+        free(new_old_buffer);
+        return ERR;
+    }
+
+    /* Fill new virtual buffer with clean spaces first */
+    for (size_t i = 0; i < new_virt_cell_count; i++) {
+        new_buffer[i].ch = ' ';
+        new_buffer[i].attr = A_NORMAL;
+    }
+
+    /* Invalidate diff tracking buffer to force clean redraw on next wrefresh */
+    for (size_t i = 0; i < new_view_cell_count; i++) {
+        new_old_buffer[i].ch = 0;
+        new_old_buffer[i].attr = 0xFF;
+    }
+
+    /* Copy overlapping valid cells from old buffer matrix to new buffer matrix */
+    int copy_rows = (old_virtual_height < new_virtual_height) ? old_virtual_height : new_virtual_height;
+    int copy_cols = (old_width < columns) ? old_width : columns;
+
+    for (int y = 0; y < copy_rows; y++) {
+        for (int x = 0; x < copy_cols; x++) {
+            size_t old_idx = (size_t)y * old_width + x;
+            size_t new_idx = (size_t)y * columns + x;
+            new_buffer[new_idx] = win->buffer[old_idx];
+        }
+    }
+
+    /* Swap buffer pointers and free old memory allocations */
+    free(win->buffer);
+    free(win->old_buffer);
+
+    win->buffer = new_buffer;
+    win->old_buffer = new_old_buffer;
+    win->height = lines;
+    win->width = columns;
+    win->virtual_height = new_virtual_height;
+
+    /* Clamp cursor and scroll offsets into valid screen coordinates */
+    if (win->cur_x >= win->width) win->cur_x = win->width - 1;
+    if (win->cur_y >= win->virtual_height) win->cur_y = win->virtual_height - 1;
+
+    int max_scroll = win->virtual_height - win->height;
+    if (win->scroll_y > max_scroll) {
+        win->scroll_y = max_scroll < 0 ? 0 : max_scroll;
+    }
+
+    return OK;
+}
+
+int resizeterm(int lines, int columns) {
+    if (lines <= 0 || columns <= 0) return ERR;
+    
+    COLS = columns;
+    LINES = lines;
+    
+    if (stdscr) {
+        return wresize(stdscr, lines, columns);
+    }
+    return OK;
+}
+
 int clear(void)  { return wclear(stdscr); }
 int werase(WINDOW *win) { return wclear(win); }
 
@@ -433,7 +544,13 @@ int werase(WINDOW *win) { return wclear(win); }
  * ========================================================================== */
 
 int wmove(WINDOW *win, int y, int x) {
-    if (!win || x < 0 || x >= win->width || y < 0 || y >= win->virtual_height) return ERR;
+    if (!win || x < 0 || x >= win->width) return ERR;
+    if (y < 0) return ERR;
+    if (!win->is_pad && y >= win->virtual_height) {
+        if (p_ensure_capacity(win, y + 1) == ERR) return ERR;
+    } else if (win->is_pad && y >= win->virtual_height) {
+        return ERR;
+    }
     win->cur_x = x;
     win->cur_y = y;
     return OK;
@@ -487,6 +604,10 @@ int init_pair(int16_t pair, int16_t f, int16_t b) {
 int waddch(WINDOW *win, const chtype ch) {
     if (!win) return ERR;
 
+    if (!win->is_pad && win->cur_y >= win->virtual_height) {
+        if (p_ensure_capacity(win, win->cur_y + 1) == ERR) return ERR;
+    }
+
     if (win->cur_x < 0 || win->cur_x >= win->width || 
         win->cur_y < 0 || win->cur_y >= win->virtual_height) {
         return ERR;
@@ -495,8 +616,11 @@ int waddch(WINDOW *win, const chtype ch) {
     if (ch == '\n') {
         win->cur_x = 0;
         win->cur_y++;
-        if (!win->is_pad && win->cur_y >= win->scroll_y + win->height) {
-            win->scroll_y = win->cur_y - win->height + 1;
+        if (!win->is_pad) {
+            p_ensure_capacity(win, win->cur_y + 1);
+            if (win->cur_y >= win->scroll_y + win->height) {
+                win->scroll_y = win->cur_y - win->height + 1;
+            }
         }
         return OK;
     }
@@ -509,8 +633,11 @@ int waddch(WINDOW *win, const chtype ch) {
     if (win->cur_x >= win->width) {
         win->cur_x = 0;
         win->cur_y++;
-        if (!win->is_pad && win->cur_y >= win->scroll_y + win->height) {
-            win->scroll_y = win->cur_y - win->height + 1;
+        if (!win->is_pad) {
+            p_ensure_capacity(win, win->cur_y + 1);
+            if (win->cur_y >= win->scroll_y + win->height) {
+                win->scroll_y = win->cur_y - win->height + 1;
+            }
         }
     }
 
@@ -581,6 +708,42 @@ int mvwprintw(WINDOW *win, int y, int x, const char *fmt, ...) {
 /* ==========================================================================
  * EXTENSIONS & HELPERS
  * ========================================================================== */
+
+int pax_set_virtual_height(WINDOW *win, int new_vh) {
+    if (!win || win->is_pad) return ERR;
+    if (new_vh < win->height) new_vh = win->height;
+    if (new_vh == win->virtual_height) return OK;
+
+    size_t new_cell_count = (size_t)win->width * new_vh;
+    PaxCell *new_buffer = (PaxCell *)realloc(win->buffer, new_cell_count * sizeof(PaxCell));
+    if (!new_buffer) return ERR;
+
+    if (new_vh > win->virtual_height) {
+        size_t old_cell_count = (size_t)win->width * win->virtual_height;
+        for (size_t i = old_cell_count; i < new_cell_count; i++) {
+            new_buffer[i].ch = ' ';
+            new_buffer[i].attr = A_NORMAL;
+        }
+    }
+
+    win->buffer = new_buffer;
+    win->virtual_height = new_vh;
+
+    if (win->cur_y >= win->virtual_height) {
+        win->cur_y = win->virtual_height - 1;
+    }
+    int max_scroll = win->virtual_height - win->height;
+    if (win->scroll_y > max_scroll) {
+        win->scroll_y = max_scroll < 0 ? 0 : max_scroll;
+    }
+
+    return OK;
+}
+
+int pax_reserve_scrollback(WINDOW *win, int additional_lines) {
+    if (!win || additional_lines <= 0) return ERR;
+    return pax_set_virtual_height(win, win->virtual_height + additional_lines);
+}
 
 int nodelay(WINDOW *win, bool bf) {
     if (!win) return ERR;
@@ -656,20 +819,49 @@ int wgetch(WINDOW *win) {
     if (bytes_read <= 0) return ERR;
     c = (unsigned char)ch;
 
+    /* Single-byte key mappings */
+    if (c == 9)  return KEY_TAB;
+    if (c == 10 || c == 13) return KEY_ENTER;
+    if (c == 127 || c == 8) return KEY_BACKSPACE;
+
+    /* Multi-byte ANSI sequence parsing */
     if (c == 27) {
         struct timeval tv = { .tv_sec = 0, .tv_usec = 100000 };
         FD_ZERO(&fds);
         FD_SET(STDIN_FILENO, &fds);
 
         if (select(STDIN_FILENO + 1, &fds, NULL, NULL, &tv) > 0) {
-            char seq[2];
-            if (read(STDIN_FILENO, &seq[0], 1) > 0 && read(STDIN_FILENO, &seq[1], 1) > 0) {
-                if (seq[0] == '[') {
-                    switch (seq[1]) {
-                        case 'A': c = KEY_UP;    break;
-                        case 'B': c = KEY_DOWN;  break;
-                        case 'C': c = KEY_RIGHT; break;
-                        case 'D': c = KEY_LEFT;  break;
+            char seq1;
+            if (read(STDIN_FILENO, &seq1, 1) > 0) {
+                if (seq1 == '[') {
+                    char seq2;
+                    if (read(STDIN_FILENO, &seq2, 1) > 0) {
+                        switch (seq2) {
+                            case 'A': return KEY_UP;
+                            case 'B': return KEY_DOWN;
+                            case 'C': return KEY_RIGHT;
+                            case 'D': return KEY_LEFT;
+                            case 'H': return KEY_HOME;
+                            case 'F': return KEY_END;
+                            case '1': case '2': case '3': case '4': case '5': case '6': {
+                                char seq3;
+                                if (read(STDIN_FILENO, &seq3, 1) > 0 && seq3 == '~') {
+                                    switch (seq2) {
+                                        case '1': return KEY_HOME;
+                                        case '4': return KEY_END;
+                                        case '5': return KEY_PPAGE;
+                                        case '6': return KEY_NPAGE;
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+                } else if (seq1 == 'O') {
+                    char seq2;
+                    if (read(STDIN_FILENO, &seq2, 1) > 0) {
+                        if (seq2 == 'H') return KEY_HOME;
+                        if (seq2 == 'F') return KEY_END;
                     }
                 }
             }
@@ -683,13 +875,23 @@ int wgetch(WINDOW *win) {
     }
 
     c = _getch();
+
+    if (c == 9)  return KEY_TAB;
+    if (c == 13) return KEY_ENTER;
+    if (c == 8)  return KEY_BACKSPACE;
+
     if (c == 0 || c == 0xE0 || c == 224) {
         int second_byte = _getch();
         switch (second_byte) {
-            case 72: c = KEY_UP;    break;
-            case 80: c = KEY_DOWN;  break;
-            case 77: c = KEY_RIGHT; break;
-            case 75: c = KEY_LEFT;  break;
+            case 72: return KEY_UP;
+            case 80: return KEY_DOWN;
+            case 77: return KEY_RIGHT;
+            case 75: return KEY_LEFT;
+            case 71: return KEY_HOME;
+            case 79: return KEY_END;
+            case 73: return KEY_PPAGE;
+            case 81: return KEY_NPAGE;
+            case 83: return KEY_BACKSPACE;
         }
     }
 #endif
